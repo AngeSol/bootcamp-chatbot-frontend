@@ -1,17 +1,24 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import './App.css'
 import {
+  addNote,
   createConversation,
   getMessages,
   listConversations,
-  sendMessage,
+  listModels,
+  streamChat,
   type ConversationSummary,
+  type Message,
 } from './api'
 import ChatWindow, { type ChatMessage } from './components/ChatWindow'
 import Sidebar from './components/Sidebar'
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : 'Une erreur est survenue.'
+}
+
+function toChat({ role, content }: Message): ChatMessage {
+  return { role, content }
 }
 
 export default function App() {
@@ -21,6 +28,9 @@ export default function App() {
   const [draft, setDraft] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [models, setModels] = useState<string[]>([])
+  const [model, setModel] = useState('')
+  const abortRef = useRef<AbortController | null>(null)
 
   // On startup, load the history and open the most recent conversation.
   useEffect(() => {
@@ -32,13 +42,23 @@ export default function App() {
       .catch((err) => setError(errorMessage(err)))
   }, [])
 
+  // The allowed models come from the backend, never hardcoded here.
+  useEffect(() => {
+    listModels()
+      .then(({ models, default: defaultModel }) => {
+        setModels(models)
+        setModel(defaultModel)
+      })
+      .catch((err) => setError(errorMessage(err)))
+  }, [])
+
   // Load the messages whenever another conversation is opened.
   useEffect(() => {
     if (activeId === null) return
     let cancelled = false
     getMessages(activeId)
       .then((list) => {
-        if (!cancelled) setMessages(list.map(({ role, content }) => ({ role, content })))
+        if (!cancelled) setMessages(list.map(toChat))
       })
       .catch((err) => !cancelled && setError(errorMessage(err)))
     return () => {
@@ -72,29 +92,75 @@ export default function App() {
   }
 
   async function handleSend() {
-    if (activeId === null) return
+    if (activeId === null || !model) return
     const text = draft.trim()
-    const isFirstMessage = messages.length === 0
+    if (!text) return
+    const conversationId = activeId
+    const countBefore = messages.length // what the backend holds before this turn
+    const hadUserMessage = messages.some((m) => m.role === 'user')
+    const controller = new AbortController()
+    abortRef.current = controller
+
     setError(null)
     setDraft('')
-    setMessages((list) => [...list, { role: 'user', content: text }])
+    // Optimistic user message + an empty assistant bubble that fills up as the stream arrives.
+    setMessages((list) => [...list, { role: 'user', content: text }, { role: 'assistant', content: '' }])
     setLoading(true)
     try {
-      const { reply, notification } = await sendMessage(activeId, text)
-      setMessages((list) => [
-        ...list,
-        { role: 'assistant', content: reply },
-        ...(notification ? [{ role: 'system-notification' as const, content: notification }] : []),
-      ])
-      // The first message becomes the conversation's preview in the sidebar.
-      if (isFirstMessage) setConversations(await listConversations())
+      const { notification, usage } = await streamChat(
+        conversationId,
+        text,
+        model,
+        controller.signal,
+        (chunk) =>
+          setMessages((list) => {
+            const copy = list.slice()
+            const last = copy[copy.length - 1]
+            copy[copy.length - 1] = { ...last, content: last.content + chunk }
+            return copy
+          }),
+      )
+      setMessages((list) => {
+        const copy = list.slice()
+        copy[copy.length - 1] = { ...copy[copy.length - 1], usage: usage ?? undefined }
+        if (notification) copy.push({ role: 'system-notification', content: notification })
+        return copy
+      })
+      // The first user message becomes the conversation's preview in the sidebar.
+      if (!hadUserMessage) listConversations().then(setConversations).catch(() => {})
     } catch (err) {
-      // The backend didn't save the turn: drop the optimistic message and give the text back.
-      setMessages((list) => list.slice(0, -1))
-      setDraft(text)
-      setError(errorMessage(err))
+      // Stop button (abort) or failure: the backend only saves a complete turn, so resync with it.
+      const aborted = err instanceof DOMException && err.name === 'AbortError'
+      if (!aborted) setError(errorMessage(err))
+      try {
+        const fresh = await getMessages(conversationId)
+        setMessages(fresh.map(toChat))
+        // Nothing was saved: give the text back so the user can resubmit it.
+        if (fresh.length === countBefore) setDraft(text)
+      } catch (syncErr) {
+        setError(errorMessage(syncErr))
+      }
     } finally {
+      abortRef.current = null
       setLoading(false)
+    }
+  }
+
+  function handleStop() {
+    abortRef.current?.abort()
+  }
+
+  async function handleAddNote() {
+    if (activeId === null) return
+    const text = draft.trim()
+    if (!text) return
+    setError(null)
+    try {
+      const note = await addNote(activeId, text)
+      setMessages((list) => [...list, toChat(note)])
+      setDraft('')
+    } catch (err) {
+      setError(errorMessage(err))
     }
   }
 
@@ -129,6 +195,11 @@ export default function App() {
             draft={draft}
             onDraftChange={setDraft}
             onSend={handleSend}
+            onAddNote={handleAddNote}
+            onStop={handleStop}
+            models={models}
+            model={model}
+            onModelChange={setModel}
           />
         )}
       </main>

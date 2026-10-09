@@ -183,6 +183,30 @@
   background: var(--bg);
 }
 
+/* Custom role "note": a private sticky note, visibly different from the dialogue. */
+.bubble.note {
+  align-self: flex-end;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--note-bg);
+  color: var(--note-text);
+  border: 1px dashed var(--note-border);
+  border-radius: 6px;
+  font-size: 0.95rem;
+}
+
+.note-label {
+  font-size: 0.75rem;
+  opacity: 0.8;
+}
+
+.usage {
+  margin-top: 8px;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
 .notification {
   align-self: center;
   padding: 4px 12px;
@@ -198,9 +222,57 @@
 
 .composer {
   display: flex;
+  flex-direction: column;
   gap: 8px;
   padding: 12px max(16px, calc((100% - 760px) / 2)) 20px;
   border-top: 1px solid var(--border);
+}
+
+.composer-tools {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.mode-toggle {
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.mode-toggle button {
+  padding: 4px 12px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.mode-toggle button.active {
+  background: var(--bg-active);
+  font-weight: 600;
+}
+
+.model-picker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+}
+
+.model-picker select {
+  max-width: 260px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+}
+
+.composer-row {
+  display: flex;
+  gap: 8px;
 }
 
 .composer textarea {
@@ -212,7 +284,7 @@
   background: var(--bg);
 }
 
-.composer button {
+.composer-row button {
   padding: 0 18px;
   border: none;
   border-radius: 8px;
@@ -222,8 +294,13 @@
   cursor: pointer;
 }
 
+.composer-row button.stop {
+  background: #c92a2a;
+}
+
 .composer button:disabled,
-.composer textarea:disabled {
+.composer textarea:disabled,
+.composer select:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }

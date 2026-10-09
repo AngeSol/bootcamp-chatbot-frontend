@@ -1,6 +1,6 @@
 // Thin typed wrappers around the FastAPI backend (proxied under /api by Vite).
 
-export type Role = 'user' | 'assistant' | 'system-notification'
+export type Role = 'user' | 'assistant' | 'system-notification' | 'note'
 
 export interface ConversationSummary {
   id: number
@@ -15,6 +15,24 @@ export interface Message {
   created_at: string
 }
 
+export interface Usage {
+  prompt_tokens?: number
+  completion_tokens?: number
+  total_tokens?: number
+}
+
+export interface ModelsResult {
+  models: string[]
+  default: string
+}
+
+// FastAPI errors look like {"detail": "..."}.
+async function errorFrom(response: Response): Promise<Error> {
+  const body = await response.json().catch(() => null)
+  const detail = typeof body?.detail === 'string' ? body.detail : null
+  return new Error(detail ?? `Erreur ${response.status}`)
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response
   try {
@@ -25,12 +43,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   } catch {
     throw new Error('Impossible de joindre le serveur.')
   }
-  if (!response.ok) {
-    // FastAPI errors look like {"detail": "..."}.
-    const body = await response.json().catch(() => null)
-    const detail = typeof body?.detail === 'string' ? body.detail : null
-    throw new Error(detail ?? `Erreur ${response.status}`)
-  }
+  if (!response.ok) throw await errorFrom(response)
   return response.json() as Promise<T>
 }
 
@@ -49,14 +62,71 @@ export function getMessages(conversationId: number): Promise<Message[]> {
   return request(`/conversations/${conversationId}/messages`)
 }
 
-export interface ChatResult {
-  reply: string
-  notification: string | null // set when the backend also stored a system-notification
+export function listModels(): Promise<ModelsResult> {
+  return request('/models')
 }
 
-export function sendMessage(conversationId: number, message: string): Promise<ChatResult> {
-  return request('/chat', {
+// A note is stored like any message but never sent to the LLM.
+export function addNote(conversationId: number, content: string): Promise<Message> {
+  return request(`/conversations/${conversationId}/notes`, {
     method: 'POST',
-    body: JSON.stringify({ conversation_id: conversationId, message }),
+    body: JSON.stringify({ content }),
   })
+}
+
+export interface StreamResult {
+  notification: string | null // set when the backend also stored a system-notification
+  usage: Usage | null
+}
+
+// Streams the answer: one JSON event per line, read with fetch + response.body.getReader().
+// (EventSource can't do POST.) Resolves once the backend confirmed the turn is saved.
+export async function streamChat(
+  conversationId: number,
+  message: string,
+  model: string,
+  signal: AbortSignal,
+  onDelta: (text: string) => void,
+): Promise<StreamResult> {
+  let response: Response
+  try {
+    response = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ conversation_id: conversationId, message, model }),
+      signal,
+    })
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') throw err
+    throw new Error('Impossible de joindre le serveur.')
+  }
+  if (!response.ok) throw await errorFrom(response)
+  if (!response.body) throw new Error('Le navigateur ne supporte pas le streaming.')
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let result: StreamResult | null = null
+
+  function handleLine(line: string) {
+    if (!line.trim()) return
+    const evt = JSON.parse(line)
+    if (evt.type === 'delta') onDelta(evt.content)
+    else if (evt.type === 'done') result = { notification: evt.notification ?? null, usage: evt.usage ?? null }
+    else if (evt.type === 'error') throw new Error(evt.detail)
+  }
+
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? '' // keep the incomplete last line for the next chunk
+    lines.forEach(handleLine)
+  }
+  handleLine(buffer)
+
+  // No "done" event: the connection was cut, the backend saved nothing.
+  if (!result) throw new Error('La réponse a été interrompue.')
+  return result
 }
